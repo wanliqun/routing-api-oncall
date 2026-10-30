@@ -435,9 +435,11 @@ def collect(cw, state: dict, now: datetime) -> dict:
 
     superseded = len({event_key(e) for e in notification_events(state)} -
                      {event_key(e) for e in events})
-    log.info("collection saved: monitored=%d alarm=%d changes=%d reminders=%d superseded=%d",
-             len(alarms), len(active_names(alarms)), len(events),
-             len(candidate["reminder_remaining"] or []), superseded)
+    log.debug("collection saved: monitored=%d alarm=%d changes=%d reminders=%d superseded=%d",
+              len(alarms), len(active_names(alarms)), len(events),
+              len(candidate["reminder_remaining"] or []), superseded)
+    if superseded:
+        log.info("pending changes superseded by latest observation: count=%d", superseded)
     for event in events:
         log.debug("pending change: alarm=%s old=%s new=%s", event["name"],
                   event["old"], event.get("new", "deleted"))

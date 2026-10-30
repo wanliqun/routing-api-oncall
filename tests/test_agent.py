@@ -242,9 +242,10 @@ class RoundTests(unittest.TestCase):
         self.assertEqual(state["notified"][ERROR], "OK")
 
     def test_logs_show_healthy_collection_and_superseded_changes_without_payload(self):
-        with self.assertLogs(agent.log, level="INFO") as logs:
+        with self.assertLogs(agent.log, level="DEBUG") as logs:
             state, _ = self.run_round({ERROR: alarm("OK")}, None)
         self.assertIn("monitored=1 alarm=0 changes=0 reminders=0 superseded=0", "\n".join(logs.output))
+        self.assertFalse(any(record.levelno >= 20 for record in logs.records))
         active = {ERROR: dict(alarm(), reason="PRIVATE_REASON_NOT_FOR_LOGS")}
         with self.assertLogs(agent.log, level="DEBUG") as logs:
             state = self.failed_round(active, state)
@@ -256,7 +257,7 @@ class RoundTests(unittest.TestCase):
         with self.assertLogs(agent.log, level="INFO") as logs:
             _, send = self.run_round({ERROR: alarm("OK")}, state)
         send.assert_not_called()
-        self.assertIn("changes=0 reminders=0 superseded=1", "\n".join(logs.output))
+        self.assertIn("pending changes superseded by latest observation: count=1", "\n".join(logs.output))
 
     def test_persistent_alarm_retries_after_restart(self):
         state = self.failed_round({ERROR: alarm()}, make_state({ERROR: alarm("OK")}))

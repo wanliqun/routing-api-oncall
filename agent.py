@@ -73,7 +73,10 @@ SEND_BUDGET_SECONDS = positive_int("SEND_BUDGET_SECONDS", "20")
 MAX_MESSAGE_BYTES = 18000  # 完整 JSON 请求体的保守预算，包含 UTF-8 和 JSON 转义。
 MIN_SEND_INTERVAL = 3.1  # 单进程请求间隔，避免分批触发每分钟 20 条的频控。
 _last_send_at: Optional[float] = None
-LOG_LEVEL = env("LOG_LEVEL", "INFO")
+LOG_LEVEL = env("LOG_LEVEL", "INFO").strip().upper()
+if LOG_LEVEL not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+    sys.stderr.write("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR or CRITICAL\n")
+    sys.exit(2)
 EXCLUDE_PATTERNS = [p.strip() for p in env("ALARM_EXCLUDE_PATTERNS", "").split(",") if p.strip()]
 
 TAG = f"[{PREFIX}]"  # 钉钉机器人"自定义关键词"用这个
@@ -84,9 +87,10 @@ FATAL_AWS_CODES = {
     "ExpiredToken", "ExpiredTokenException", "SignatureDoesNotMatch",
 }
 
-logging.basicConfig(level=LOG_LEVEL, stream=sys.stdout,
-                    format="%(levelname)s %(message)s")
+logging.basicConfig(level=logging.WARNING, stream=sys.stdout,
+                    format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("routing-oncall")
+log.setLevel(LOG_LEVEL)  # DEBUG 只作用于本程序，不开启 SDK 请求/认证调试日志。
 for obsolete in ("MAX_PENDING_NOTIFICATIONS", "MAX_PENDING_BYTES"):
     if obsolete in os.environ:
         log.warning("%s is obsolete; use MAX_STATE_BYTES for the state size limit", obsolete)
@@ -393,6 +397,7 @@ def notification_events(state: dict) -> List[dict]:
 
 
 def collect(cw, state: dict, now: datetime) -> dict:
+    log.debug("collection started: prefix=%s", PREFIX)
     alarms = fetch_alarms(cw)
     candidate = copy.deepcopy(state)
     candidate["alarms"] = alarms
@@ -425,6 +430,17 @@ def collect(cw, state: dict, now: datetime) -> dict:
         raise RuntimeError("state capacity exceeded: snapshot not committed; "
                            "increase MAX_STATE_BYTES or reduce monitored alarms")
     save_state(candidate)  # 先保存最新观测，再允许 HTTP；不保存历史正文。
+    def event_key(event):
+        return (event["name"], event["kind"], event["old"], event.get("new"))
+
+    superseded = len({event_key(e) for e in notification_events(state)} -
+                     {event_key(e) for e in events})
+    log.info("collection saved: monitored=%d alarm=%d changes=%d reminders=%d superseded=%d",
+             len(alarms), len(active_names(alarms)), len(events),
+             len(candidate["reminder_remaining"] or []), superseded)
+    for event in events:
+        log.debug("pending change: alarm=%s old=%s new=%s", event["name"],
+                  event["old"], event.get("new", "deleted"))
     return candidate
 
 
@@ -457,6 +473,9 @@ def deliver_notifications(state: dict, deadline: float, now: datetime) -> dict:
     for attempt in range(MAX_SEND_ATTEMPTS_PER_ROUND):
         if part is None or time.monotonic() >= deadline:
             break
+        log.debug("delivery attempt %d/%d: kind=%s alarms=%d bytes=%d",
+                  attempt + 1, MAX_SEND_ATTEMPTS_PER_ROUND, part["kind"],
+                  len(part["events"]), len(message_body(part["text"])))
         try:
             send_once(part["text"], deadline=deadline)
         except SendBudgetExhausted:
@@ -470,6 +489,7 @@ def deliver_notifications(state: dict, deadline: float, now: datetime) -> dict:
         else:
             state = acknowledge(state, part, utc_now())
             log.info("sent %s: %d alarms observed_at=%s", part["kind"], len(part["events"]), iso(now))
+            log.debug("delivery acknowledged: alarms=%s", [e["name"] for e in part["events"]])
             part = next(parts, None)
             failure = None
             consecutive_failures = 0
@@ -484,6 +504,10 @@ def deliver_notifications(state: dict, deadline: float, now: datetime) -> dict:
         time.sleep(delay)
     if failure is not None:
         raise RuntimeError(f"DingTalk delivery deferred: {failure}") from None
+    if part is not None:
+        log.info("delivery budget reached: remaining_changes=%d remaining_reminders=%d; "
+                 "recheck next round", len(notification_events(state)),
+                 len(state["reminder_remaining"] or []))
     return state
 
 # ---------------------------------------------------------------- 主循环
@@ -500,7 +524,8 @@ def one_round(cw, state: Optional[dict], now: datetime) -> dict:
     except ClientError as e:
         if e.response.get("Error", {}).get("Code", "") in FATAL_AWS_CODES:
             raise
-        log.warning("AWS collection failed; delivery skipped: %s", type(e).__name__)
+        log.warning("AWS collection failed; delivery skipped: code=%s",
+                    e.response.get("Error", {}).get("Code", "unknown"))
         return state
     except (NoCredentialsError, PartialCredentialsError, NoRegionError):
         raise
@@ -528,8 +553,11 @@ def main() -> None:
     except RuntimeError as e:
         log.critical("state upgrade required: %s", e)
         sys.exit(2)
-    log.info("starting: prefix=%s state=%s (%s)", PREFIX, STATE_FILE,
-             "found" if state else "bootstrap")
+    log.info("starting: prefix=%s state=%s (%s) log_level=%s poll_seconds=%d "
+             "reminder_seconds=%d send_attempts=%d send_budget_seconds=%d max_state_bytes=%d",
+             PREFIX, STATE_FILE, "found" if state else "bootstrap", LOG_LEVEL,
+             POLL_SECONDS, REMINDER_SECONDS, MAX_SEND_ATTEMPTS_PER_ROUND,
+             SEND_BUDGET_SECONDS, MAX_STATE_BYTES)
     send_failures = 0
 
     while True:

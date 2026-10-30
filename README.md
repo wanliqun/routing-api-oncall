@@ -252,6 +252,26 @@ sudo journalctl -u routing-oncall.service -n 100 --no-pager
 sudo journalctl -fu routing-oncall.service
 ```
 
+### 日志级别
+
+在 `/etc/routing-oncall/agent.env` 设置 `LOG_LEVEL=INFO`，修改后执行
+`sudo systemctl restart routing-oncall.service` 生效。默认 `INFO`；支持 `DEBUG`、
+`INFO`、`WARNING`、`ERROR`、`CRITICAL`，不区分大小写并忽略两端空格。
+非法值会在启动时明确报错并退出 2。
+
+| 级别 | 内容 |
+|---|---|
+| INFO | 启动参数；每轮保存的监控数、异常数、待通知变化数、待提醒数及过时变化取消数；消息发送并确认成功；发送预算耗尽后的剩余项数 |
+| DEBUG | 额外记录采集开始、待通知告警名称及新旧状态、每次发送的项数和 JSON 字节数、成功确认的告警名称 |
+| WARNING | AWS 临时查询失败及错误码、可重试投递错误、废弃配置 |
+| ERROR / CRITICAL | 通知或落盘失败、损坏状态文件、容量不足、无法安全升级、认证错误及退出原因 |
+
+日志写入标准输出，带时间、级别和 logger 名称；本服务下可用上面的 `journalctl`
+命令查看。正常运行时每轮有一条 INFO 采集摘要，便于区分“没有告警”和“没有运行”。
+`superseded` 只统计被最新观测取消或替代的待通知变化，不包含已成功确认的变化。
+DEBUG 只开启 oncall 自身日志；boto3/botocore 仍为 WARNING，避免输出详细请求与认证信息。
+不记录消息正文、告警原因、Webhook、Secret 或签名。
+
 `fatal AWS error`：核对 region、profile、权限和凭证有效期。`DingTalk rejected message`：核对错误码、关键词、加签和 Webhook。`state capacity exceeded`：本轮快照未接纳且未发送消息，检查监控范围和 `MAX_STATE_BYTES`。`state upgrade required`：按升级说明处理原状态文件，不要直接删除。`Permission denied`：核对 `/var/lib/routing-oncall` 所有权与配置文件权限。日志不输出 Webhook URL、token 或签名。
 
 ## 本地验证
@@ -273,6 +293,6 @@ venv/bin/python -m unittest discover -s tests -v
 - 原状态兼容、schema 2 非空队列升级保护、排除规则和删除后重现。
 - AWS 临时查询失败时跳过旧状态投递。
 
-本轮 69 项离线测试通过（开启 `ResourceWarning` 错误检查）。验证使用 Python 3.12、boto3 1.43.121；主程序另做 Python 3.8 语法兼容检查，不等同于 Python 3.8 运行时验证。未修改 systemd unit，未部署到目标 Ubuntu，未完成钉钉服务端长度和真实投递验收。
+本轮 72 项离线测试通过（开启 `ResourceWarning` 错误检查）。验证使用 Python 3.12、boto3 1.43.121；主程序另做 Python 3.8 语法兼容检查，不等同于 Python 3.8 运行时验证。未修改 systemd unit，未部署到目标 Ubuntu，未完成钉钉服务端长度和真实投递验收。
 
 参考：[Boto3 凭证链](https://docs.aws.amazon.com/boto3/latest/guide/credentials.html)、[DescribeAlarms](https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarms.html)、[MetricAlarm 时间字段](https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_MetricAlarm.html)、[钉钉自定义机器人发送群消息](https://open.dingtalk.com/document/orgapp/custom-robots-send-group-messages)、[systemd.exec](https://www.freedesktop.org/software/systemd/man/256/systemd.exec.html)。

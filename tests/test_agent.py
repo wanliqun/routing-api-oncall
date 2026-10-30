@@ -241,6 +241,23 @@ class RoundTests(unittest.TestCase):
         send.assert_not_called()
         self.assertEqual(state["notified"][ERROR], "OK")
 
+    def test_logs_show_healthy_collection_and_superseded_changes_without_payload(self):
+        with self.assertLogs(agent.log, level="INFO") as logs:
+            state, _ = self.run_round({ERROR: alarm("OK")}, None)
+        self.assertIn("monitored=1 alarm=0 changes=0 reminders=0 superseded=0", "\n".join(logs.output))
+        active = {ERROR: dict(alarm(), reason="PRIVATE_REASON_NOT_FOR_LOGS")}
+        with self.assertLogs(agent.log, level="DEBUG") as logs:
+            state = self.failed_round(active, state)
+        output = "\n".join(logs.output)
+        self.assertIn("pending change: alarm=" + ERROR + " old=OK new=ALARM", output)
+        self.assertIn("bytes=", output)
+        self.assertNotIn("PRIVATE_REASON_NOT_FOR_LOGS", output)
+        self.assertNotIn(agent.WEBHOOK, output)
+        with self.assertLogs(agent.log, level="INFO") as logs:
+            _, send = self.run_round({ERROR: alarm("OK")}, state)
+        send.assert_not_called()
+        self.assertIn("changes=0 reminders=0 superseded=1", "\n".join(logs.output))
+
     def test_persistent_alarm_retries_after_restart(self):
         state = self.failed_round({ERROR: alarm()}, make_state({ERROR: alarm("OK")}))
         state, send = self.run_round({ERROR: alarm()}, state, NOW + timedelta(minutes=1))
@@ -433,7 +450,7 @@ class RoundTests(unittest.TestCase):
         with patch.object(agent, "MAX_SEND_ATTEMPTS_PER_ROUND", 1), \
                 patch.object(agent, "MAX_MESSAGE_BYTES", 500), \
                 patch.object(agent, "fetch_alarms", return_value=active) as fetch, \
-                patch.object(agent, "send_once") as send:
+                patch.object(agent, "send_once") as send, self.assertLogs(agent.log, level="INFO") as logs:
             state = agent.one_round(None, None, NOW)
             first_count = len(state["notified"])
             self.assertGreater(first_count, 0)
@@ -442,6 +459,7 @@ class RoundTests(unittest.TestCase):
             self.assertGreater(len(state["notified"]), first_count)
         self.assertEqual(send.call_count, 2)
         self.assertEqual(fetch.call_count, 2)
+        self.assertIn("delivery budget reached: remaining_changes=", "\n".join(logs.output))
 
     def test_temporary_aws_failure_preserves_baseline_and_skips_stale_delivery(self):
         state = make_state({ERROR: alarm()}, notified={ERROR: "OK"})
@@ -851,6 +869,29 @@ class SendTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    def test_log_level_defaults_normalization_filtering_and_sdk_isolation(self):
+        code = ("import agent,logging; print('level='+agent.LOG_LEVEL); "
+                "agent.log.debug('APP_DEBUG'); agent.log.info('APP_INFO'); "
+                "logging.getLogger('botocore.endpoint').debug('SDK_DEBUG_PRIVATE')")
+        for value, expected in ((None, "INFO"), (" debug ", "DEBUG"), ("warning", "WARNING")):
+            with self.subTest(value=value):
+                env = dict(os.environ)
+                env.pop("LOG_LEVEL", None)
+                if value is not None:
+                    env["LOG_LEVEL"] = value
+                result = subprocess.run([sys.executable, "-c", code], env=env,
+                                        capture_output=True, text=True, check=True)
+                self.assertIn("level=" + expected, result.stdout)
+                self.assertEqual("APP_DEBUG" in result.stdout, expected == "DEBUG")
+                self.assertEqual("APP_INFO" in result.stdout, expected != "WARNING")
+                self.assertNotIn("SDK_DEBUG_PRIVATE", result.stdout + result.stderr)
+
+    def test_invalid_log_level_exits_two_before_network(self):
+        result = subprocess.run([sys.executable, "-c", "import agent"],
+                                env=dict(os.environ, LOG_LEVEL="verbose"), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("LOG_LEVEL must be", result.stderr)
+
     def test_five_failed_rounds_exit_one_and_reload_saved_state(self):
         with patch.object(agent.boto3, "client"), patch.object(agent.signal, "signal"), \
                 patch.object(agent, "load_state", return_value=None) as load, \

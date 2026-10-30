@@ -1,0 +1,28 @@
+[Unit]
+Description=RoutingAPI CloudWatch Alarm Notifier
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=AWS_DEFAULT_REGION=ap-southeast-1
+EnvironmentFile=/etc/routing-oncall/agent.env
+ExecStart=/opt/routing-oncall/venv/bin/python3 /opt/routing-oncall/agent.py
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+StateDirectory=routing-oncall
+StateDirectoryMode=0700
+UMask=0077
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
